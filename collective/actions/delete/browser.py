@@ -20,7 +20,7 @@ import transaction
 from Acquisition import aq_parent, aq_inner
 from ZODB.POSException import ConflictError
 from OFS.interfaces import IObjectManager
-from zope.interface import implements
+from zope.interface import implementer
 from Products.Five.browser import BrowserView
 from Products.Five.browser.pagetemplatefile import ViewPageTemplateFile
 try:
@@ -31,22 +31,19 @@ from zope.component import adapts
 from plone.app.linkintegrity.exceptions import (
     LinkIntegrityNotificationException)
 from zope.i18nmessageid import MessageFactory
-from Products.CMFPlone.utils import getSiteEncoding
-from Products.CMFPlone.utils import getFSVersionTuple
-from Products.CMFPlone.utils import transaction_note
 
-from interfaces import IFolderDelete
-from interfaces import IAction
-from interfaces import IActionCancel
-from interfaces import IActionSuccess
-from interfaces import IActionFailure
+from .interfaces import IFolderDelete
+from .interfaces import IAction
+from .interfaces import IActionCancel
+from .interfaces import IActionSuccess
+from .interfaces import IActionFailure
 
 _ = MessageFactory('plone')
 
 
+@implementer(IAction)
 class Action(object):
 
-    implements(IAction)
     adapts(IObjectManager)
 
     def __init__(self, context):
@@ -58,28 +55,24 @@ class Action(object):
     def __call__(self):
         return self.view()()
 
-
+@implementer(IActionSuccess)
 class ActionSuccess(Action):
     __module__ = __name__
-    implements(IActionSuccess)
     adapts(IObjectManager)
 
-
+@implementer(IActionFailure)
 class ActionFailure(Action):
     __module__ = __name__
-    implements(IActionFailure)
     adapts(IObjectManager)
 
-
+@implementer(IActionCancel)
 class ActionCancel(Action):
     __module__ = __name__
-    implements(IActionCancel)
     adapts(IObjectManager)
 
-
+@implementer(IFolderDelete)
 class FolderDelete(BrowserView):
     __module__ = __name__
-    implements(IFolderDelete)
     delete_confirmation = ViewPageTemplateFile('templates/confirmation.pt')
 
     def __init__(self, context, request):
@@ -88,17 +81,19 @@ class FolderDelete(BrowserView):
         self.paths = None
         self.portal = getSite()
         self.utils = self.portal.plone_utils
+        self.initializePaths()
 
-        if 'paths' in self.request.form:
-            self.paths = self.request.form['paths']
-
-    def action(self):
-        """ return name of the view """
-        return ('@@%s' % self.__name__)
-
-    def paths(self):
-        """ return paths"""
-        return self.paths
+    def initializePaths(self):
+        form = self.request.form
+        if 'paths' in form:
+            paths = form['paths']
+            # strip portal path from paths only when called from
+            # folder_contents but not when called by submitting
+            # to itself (confirmation screen)
+            if 'confirm' in form and form['confirm'] == 'confirmed':
+                self.paths = paths
+            else:
+                self.paths = [self.strip_portal_path(path) for path in paths]
 
     def strip_portal_path(self, path):
         portal_path = self.portal.getPhysicalPath()
@@ -108,11 +103,13 @@ class FolderDelete(BrowserView):
                 path.pop(0)
         return '/'.join(path)
 
-    def titles(self):
-        """ return paths, without portal_id"""
+    def action(self):
+        """ return name of the view """
+        return ('@@%s' % self.__name__)
 
-        stripped_paths = [self.strip_portal_path(path) for path in self.paths]
-        return stripped_paths
+    def titles(self):
+        """ return paths """
+        return self.paths
 
     def __call__(self):
         """ some documentation """
@@ -132,7 +129,8 @@ class FolderDelete(BrowserView):
     def delete_folder(self):
         """ delete objects """
         self.request.set('link_integrity_events_to_expect', len(self.paths))
-        if getFSVersionTuple() > (4, 0):
+        tool = getToolByName(self.context, "plone_utils", None)
+        if tool.getFSVersionTuple() > (4, 0):
             # Using the legacy method from Plone 4
             success, failure = self.utils.deleteObjectsByPaths(
                 self.paths, REQUEST=self.request)
@@ -165,7 +163,8 @@ class FolderDelete(BrowserView):
         # use the portal for traversal in case we have relative paths
         portal = getSite()
         traverse = portal.restrictedTraverse
-        charset = getSiteEncoding(self.context)
+        tool = getToolByName(self.context, "plone_utils", None)
+        charset = tool.getSiteEncoding()
         for path in paths:
             # Skip and note any errors
             if handle_errors:
@@ -199,11 +198,12 @@ class FolderDelete(BrowserView):
                 raise
             except LinkIntegrityNotificationException:
                 raise
-            except Exception, e:
+            except Exception as e:
                 if handle_errors:
                     sp.rollback()
                     failure[path] = e
                 else:
                     raise
-        transaction_note('Deleted %s' % (', '.join(success)))
+        tool = getToolByName(self.context, "plone_utils", None)
+        tool.transaction_note('Deleted %s' % (', '.join(success)))
         return success, failure
